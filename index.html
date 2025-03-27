@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>얼굴 표정 인식 & 사운드 컨트롤</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        #container {
+            position: relative;
+            width: 640px; /* 비디오/캔버스 크기 고정 */
+            height: 480px;
+            border: 1px solid black;
+            margin-bottom: 15px;
+            background-color: #333; /* 로딩 중 배경색 */
+        }
+        #video {
+            display: none; /* 비디오 원본 숨김 */
+            width: 100%;
+            height: 100%;
+            transform: scaleX(-1); /* 좌우 반전 (거울 모드) */
+        }
+        #canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            transform: scaleX(-1); /* 비디오와 동일하게 좌우 반전 */
+        }
+        #status {
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 10px;
+        }
+        p { text-align: center; }
+    </style>
+    <!-- TensorFlow.js 라이브러리 -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+    <!-- Face Landmark Detection 모델 -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/face-landmarks-detection"></script>
+    <!-- (Optional) Scatter-GL for easy triangulation drawing, loaded within JS -->
+    <!-- <script src="https://cdn.jsdelivr.net/npm/scatter-gl@0.0.1/lib/scatter-gl.min.js"></script> -->
+
+</head>
+<body>
+    <h1>얼굴 표정 인식 & 사운드 컨트롤</h1>
+    <p>카메라에 얼굴을 보여주세요.<br>입을 벌리면 소리의 높낮이가 변합니다!</p>
+
+    <div id="container">
+        <video id="video" playsinline></video>
+        <canvas id="canvas"></canvas>
+    </div>
+    <div id="status">카메라 및 모델 준비 중...</div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const statusDiv = document.getElementById('status');
+
+        let detector;
+        let audioContext;
+        let oscillator;
+        let gainNode;
+        let isAudioSetup = false; // 오디오 노드가 설정되었는지 여부
+        let isAudioPlaying = false; // 오실레이터가 시작되었는지 여부
+        const minConfidence = 0.7; // 얼굴 인식 최소 신뢰도
+
+        // 입 벌림 정도에 따른 주파수 매핑 설정
+        const minMouthOpenDist = 3;  // 입 다물었을 때의 최소 거리 (튜닝 필요)
+        const maxMouthOpenDist = 35; // 입 최대로 벌렸을 때의 거리 (튜닝 필요)
+        const minFreq = 110; // 최소 주파수 (A2 음)
+        const maxFreq = 880; // 최대 주파수 (A5 음)
+
+        // MediaPipe Face Mesh Landmark Indices (입술 관련)
+        // https://github.com/google/mediapipe/blob/master/mediapipe/modules/face_geometry/data/canonical_face_model_uv_visualization.png
+        const UPPER_LIP_CENTER = 13;
+        const LOWER_LIP_CENTER = 14;
+
+        // --- Web Audio API 설정 ---
+        function initAudio() {
+            try {
+                window.AudioContext = window.AudioContext || window.webkitAudioContext;
+                audioContext = new AudioContext();
+                // 오실레이터와 게인 노드 생성
+                oscillator = audioContext.createOscillator();
+                gainNode = audioContext.createGain();
+
+                oscillator.type = 'sine'; // 사인파
+                oscillator.frequency.setValueAtTime(minFreq, audioContext.currentTime); // 초기 주파수 설정
+                gainNode.gain.setValueAtTime(0, audioContext.currentTime); // 초기 볼륨 0 (소리 안남)
+
+                // 노드 연결: Oscillator -> Gain -> Destination (스피커)
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+
+                isAudioSetup = true;
+                statusDiv.innerText = "오디오 준비 완료. 카메라/모델 로딩 중...";
+                console.log("AudioContext 및 기본 노드 생성 성공");
+
+                // 사용자 상호작용 시 오디오 컨텍스트 재개 리스너 추가
+                document.body.addEventListener('click', resumeAudioContext, { once: true });
+
+            } catch (e) {
+                console.error("Web Audio API를 지원하지 않습니다.", e);
+                statusDiv.innerText = "오류: Web Audio API를 지원하지 않습니다.";
+                alert("Web Audio API를 지원하지 않는 브라우저입니다.");
+                isAudioSetup = false;
+            }
+        }
+
+        function resumeAudioContext() {
+             if (audioContext && audioContext.state === 'suspended') {
+                audioContext.resume().then(() => {
+                    console.log('AudioContext resumed on user interaction.');
+                    // 오실레이터 시작 (한 번만 호출)
+                    if (isAudioSetup && !isAudioPlaying) {
+                        oscillator.start();
+                        isAudioPlaying = true;
+                        console.log("Oscillator started after context resume.");
+                    }
+                }).catch(e => console.error('Error resuming AudioContext:', e));
+            } else if (isAudioSetup && !isAudioPlaying && audioContext && audioContext.state === 'running') {
+                 // 이미 running 상태이면 바로 오실레이터 시작
+                 oscillator.start();
+                 isAudioPlaying = true;
+                 console.log("Oscillator started (context already running).");
+            }
+        }
+
+        // 얼굴 감지 시 오디오 시작 (볼륨 높이기)
+        function startAudio() {
+            if (isAudioSetup && isAudioPlaying && gainNode) {
+                // 부드럽게 볼륨을 0.5로 올림
+                gainNode.gain.setTargetAtTime(0.5, audioContext.currentTime, 0.1);
+            } else if (isAudioSetup && !isAudioPlaying && audioContext && audioContext.state === 'running') {
+                // AudioContext는 실행 중이지만 오실레이터가 아직 시작되지 않은 경우 (예: 자동재생 정책)
+                try {
+                    oscillator.start();
+                    isAudioPlaying = true;
+                    gainNode.gain.setTargetAtTime(0.5, audioContext.currentTime, 0.1); // 볼륨 올리기
+                    console.log("Oscillator started explicitly in startAudio.");
+                } catch (e) {
+                    console.warn("Oscillator start failed in startAudio (might have already started or context issue):", e);
+                }
+            } else if (isAudioSetup && !isAudioPlaying && audioContext && audioContext.state === 'suspended') {
+                // 사용자가 아직 클릭 안했을 수 있음. 클릭 유도 메시지 등 표시 가능
+                console.log("AudioContext is suspended. Click the page to enable audio.");
+                statusDiv.innerText = "오디오 활성화를 위해 화면을 클릭하세요.";
+            }
+        }
+
+        // 얼굴 감지 안될 시 오디오 중지 (볼륨 낮추기)
+        function stopAudio() {
+            if (isAudioSetup && gainNode) {
+                // 부드럽게 볼륨을 0으로 내림
+                gainNode.gain.setTargetAtTime(0, audioContext.currentTime, 0.2);
+            }
+        }
+
+        // 입 벌림 정도에 따라 주파수 조절
+        function updateFrequency(mouthOpenDistance) {
+            if (!isAudioSetup || !isAudioPlaying) return;
+
+            // 거리를 [0, 1] 범위로 정규화 (최소/최대 거리 벗어나면 0 또는 1로 고정)
+            let normalizedDist = (mouthOpenDistance - minMouthOpenDist) / (maxMouthOpenDist - minMouthOpenDist);
+            normalizedDist = Math.max(0, Math.min(1, normalizedDist)); // 0과 1 사이로 클램핑
+
+            // 정규화된 값으로 주파수 계산 (선형 보간)
+            const frequency = minFreq + normalizedDist * (maxFreq - minFreq);
+
+            // 오실레이터 주파수 부드럽게 변경
+            oscillator.frequency.setTargetAtTime(frequency, audioContext.currentTime, 0.05); // 0.05초 동안 변경
+        }
+
+
+        // --- 웹캠 설정 ---
+        async function setupCamera() {
+             try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+                video.srcObject = stream;
+                return new Promise((resolve) => {
+                    video.onloadedmetadata = () => {
+                        video.width = video.videoWidth; video.height = video.videoHeight;
+                        canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+                        resolve(video);
+                    };
+                });
+            } catch (error) { console.error("카메라 접근 오류:", error); statusDiv.innerText = "오류: 카메라 접근 불가"; alert("카메라 권한 허용 필요"); throw error; }
+        }
+
+        // --- Face Landmark Detection 모델 로드 ---
+        async function loadDetector() {
+            try {
+                statusDiv.innerText = "TF.js 백엔드 준비 중...";
+                await tf.ready();
+                statusDiv.innerText = "얼굴 인식 모델 로딩 중...";
+
+                const model = faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh;
+                const detectorConfig = {
+                    runtime: 'tfjs', // 'mediapipe'는 추가 설정 필요할 수 있음
+                    refineLandmarks: true, // 더 정교한 랜드마크 사용 (입, 눈 등에 중요)
+                    maxFaces: 1 // 동시에 감지할 최대 얼굴 수 (간단하게 1로 시작)
+                };
+                detector = await faceLandmarksDetection.createDetector(model, detectorConfig);
+
+                statusDiv.innerText = "모델 로드 완료. 감지를 시작합니다.";
+                console.log(`Face Landmark 모델 로드 완료`);
+            } catch (error) { console.error("모델 로드 오류:", error); statusDiv.innerText = "오류: 얼굴 인식 모델 로드 실패"; throw error; }
+        }
+
+        // --- 얼굴 감지 및 그리기 루프 ---
+        let faceDetectedLastFrame = false; // 이전 프레임에서 얼굴 감지 여부
+
+        async function detectFaces() {
+            if (!detector || video.readyState < 3) { // 비디오 데이터 충분한지 확인 (3: HAVE_FUTURE_DATA, 4: HAVE_ENOUGH_DATA)
+                 requestAnimationFrame(detectFaces);
+                 return;
+            }
+
+            let faceDetectedThisFrame = false;
+            try {
+                const faces = await detector.estimateFaces(video, {
+                    flipHorizontal: false // 비디오 요소에서 이미 반전했으므로 false
+                });
+
+                // 캔버스 클리어 및 비디오 프레임 그리기
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                // 감지된 얼굴 처리 (maxFaces: 1 설정했으므로 첫 번째 얼굴만 사용)
+                if (faces && faces.length > 0) {
+                    const face = faces[0];
+                    // estimateFaces는 score를 box 안에 포함시킴 (v3.0.0 기준)
+                     if (face.box && face.box.score >= minConfidence) {
+                         faceDetectedThisFrame = true;
+                         drawFaceMesh(face.keypoints); // 얼굴 메쉬 그리기
+
+                         // 입 벌림 거리 계산 및 주파수 업데이트
+                         const upperLip = face.keypoints[UPPER_LIP_CENTER];
+                         const lowerLip = face.keypoints[LOWER_LIP_CENTER];
+                         if (upperLip && lowerLip) {
+                             const mouthDistance = Math.sqrt(Math.pow(upperLip.x - lowerLip.x, 2) + Math.pow(upperLip.y - lowerLip.y, 2));
+                             // console.log("Mouth Distance:", mouthDistance); // 거리 값 확인용
+                             updateFrequency(mouthDistance);
+                         }
+                     }
+                }
+
+                // 얼굴 감지 상태 변화에 따라 오디오 시작/중지
+                if (faceDetectedThisFrame && !faceDetectedLastFrame) {
+                    startAudio(); // 얼굴이 새로 감지되면 오디오 시작
+                } else if (!faceDetectedThisFrame && faceDetectedLastFrame) {
+                    stopAudio(); // 얼굴이 사라지면 오디오 중지
+                }
+                faceDetectedLastFrame = faceDetectedThisFrame; // 현재 상태를 다음 프레임을 위해 저장
+
+
+            } catch (error) {
+                console.error("얼굴 감지 중 오류:", error);
+                faceDetectedLastFrame = false; // 오류 발생 시 얼굴 없음으로 처리
+                stopAudio(); // 오류 시 오디오 중지
+            }
+
+            requestAnimationFrame(detectFaces); // 다음 프레임 요청
+        }
+
+        // 얼굴 메쉬(삼각형) 그리기
+        function drawFaceMesh(keypoints) {
+            ctx.strokeStyle = 'rgba(0, 255, 0, 0.5)'; // 반투명 녹색 선
+            ctx.lineWidth = 0.5; // 얇은 선
+
+            // TRIANGULATION 상수 사용 (모델에서 제공)
+            const triangles = faceLandmarksDetection.util.TRIANGULATION;
+
+            for (let i = 0; i < triangles.length / 3; i++) {
+                // 각 삼각형을 구성하는 세 점의 인덱스
+                const kptIndex1 = triangles[i * 3];
+                const kptIndex2 = triangles[i * 3 + 1];
+                const kptIndex3 = triangles[i * 3 + 2];
+
+                const kp1 = keypoints[kptIndex1];
+                const kp2 = keypoints[kptIndex2];
+                const kp3 = keypoints[kptIndex3];
+
+                if (kp1 && kp2 && kp3) {
+                    ctx.beginPath();
+                    ctx.moveTo(kp1.x, kp1.y);
+                    ctx.lineTo(kp2.x, kp2.y);
+                    ctx.lineTo(kp3.x, kp3.y);
+                    ctx.closePath(); // 삼각형 닫기
+                    ctx.stroke();
+                }
+            }
+
+            // (선택사항) 특정 랜드마크에 점 찍기 (예: 입술)
+            // ctx.fillStyle = 'red';
+            // const ul = keypoints[UPPER_LIP_CENTER];
+            // const ll = keypoints[LOWER_LIP_CENTER];
+            // if (ul) ctx.fillRect(ul.x - 1, ul.y - 1, 3, 3);
+            // if (ll) ctx.fillRect(ll.x - 1, ll.y - 1, 3, 3);
+        }
+
+
+        // --- 메인 실행 함수 ---
+        async function main() {
+            try {
+                initAudio(); // 오디오 먼저 초기화 시도
+                statusDiv.innerText = "카메라 접근 권한 요청 중...";
+                await setupCamera();
+                video.play();
+                statusDiv.innerText = "카메라 준비 완료.";
+                await loadDetector();
+                detectFaces(); // 감지 루프 시작
+            } catch (error) { console.error("초기화 실패:", error); statusDiv.innerText = "초기화 오류 발생."; }
+        }
+
+        // 페이지 로드 완료 후 메인 함수 실행
+        window.addEventListener('load', main);
+
+    </script>
+</body>
+</html>
