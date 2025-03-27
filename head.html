@@ -3,46 +3,64 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Face Aiming Reticle (MediaPipe Tasks)</title>
+    <title>Face Aiming Reticle (TensorFlow.js)</title>
     <style>
         body {
             margin: 0; padding: 0; display: flex; justify-content: center; align-items: center;
-            min-height: 100vh; background-color: #222; overflow: hidden; font-family: sans-serif;
+            min-height: 100vh; background-color: #1a1a1a; /* 어두운 배경 */
+             overflow: hidden; font-family: system-ui, sans-serif; /* 시스템 기본 폰트 */
         }
         #container {
             position: relative; width: 640px; height: 480px;
-            border: 2px solid #555; background-color: #000; overflow: hidden;
+            border: 1px solid #444; /* 옅은 테두리 */
+             background-color: #000; overflow: hidden;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.4); /* 그림자 효과 */
         }
         #webcam {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
             transform: scaleX(-1); /* Mirror mode */
             object-fit: cover;
+            display: block; /* video 요소 아래 작은 공백 제거 */
         }
         #overlay {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
             z-index: 10; pointer-events: none;
         }
-        /* Reticle Styles */
-        .reticle { stroke: rgba(0, 255, 0, 0.8); stroke-width: 2; fill: none; } /* Green reticle */
-        .reticle-center-dot { fill: rgba(0, 255, 0, 0.9); } /* Green dot */
-        .reticle-group { transition: transform 0.05s linear; }
+        /* Reticle Styles - 파란색으로 변경 */
+        .reticle { stroke: rgba(0, 150, 255, 0.85); stroke-width: 2.5; fill: none; }
+        .reticle-center-dot { fill: rgba(0, 150, 255, 0.95); }
+        .reticle-group { transition: transform 0.04s linear; } /* 더 빠른 반응 */
 
         /* Loading/Error Messages */
          #message {
             position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
             color: white; font-size: 1.1em; background-color: rgba(0, 0, 0, 0.8);
-            padding: 15px; border-radius: 5px; z-index: 20; text-align: center;
-            display: block; /* Initially visible */ max-width: 80%;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.5);
+            padding: 18px 25px; border-radius: 6px; z-index: 20; text-align: center;
+            display: block; max-width: 85%;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.6);
+            border: 1px solid rgba(255, 255, 255, 0.1);
          }
-         #message.error { background-color: rgba(200, 0, 0, 0.85); }
+         #message.error { background-color: rgba(220, 20, 60, 0.85); border: 1px solid rgba(255, 99, 71, 0.5); } /* Crimson */
     </style>
 
-    <!-- Import @mediapipe/tasks-vision -->
-    <script type="module">
-        // Import necessary modules from tasks-vision CDN
-        import { FaceDetector, FilesetResolver } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.js'; // Use vision_bundle for simplicity
+    <!-- TensorFlow.js Core and WebGL backend -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.20.0/dist/tf-core.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl@4.20.0/dist/tf-backend-webgl.min.js"></script>
+    <!-- TensorFlow.js Converter (needed by some models) -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter@4.20.0/dist/tf-converter.min.js"></script>
 
+    <!-- BlazeFace Model -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface@0.1.0/dist/blazeface.min.js"></script>
+
+</head>
+<body>
+    <div id="container">
+        <video id="webcam" autoplay muted playsinline width="640" height="480"></video>
+        <svg id="overlay"></svg>
+        <div id="message">페이지 로딩 중...</div>
+    </div>
+
+    <script>
         const videoElement = document.getElementById('webcam');
         const overlayElement = document.getElementById('overlay');
         const messageElement = document.getElementById('message');
@@ -50,10 +68,9 @@
         let reticleGroup = null;
         let videoWidth = 640;
         let videoHeight = 480;
-        let faceDetector;
+        let model = null; // BlazeFace model
+        let isModelReady = false;
         let lastVideoTime = -1;
-        let detectionResults = null;
-        let isDetectorReady = false; // Flag to check if detector is initialized
 
         // --- Message Handling ---
         function showMessage(msg, isError = false) {
@@ -67,16 +84,14 @@
         }
 
         // --- Reticle Drawing ---
-        function updateReticle(normalizedX, normalizedY, size = 40) {
-            const pixelX = normalizedX * videoWidth;
-            const pixelY = normalizedY * videoHeight;
-            const mirroredPixelX = videoWidth - pixelX; // Mirror X
+        function updateReticle(pixelX, pixelY, size = 45) { // 약간 크게
+            const mirroredPixelX = videoWidth - pixelX; // Mirror X coordinate
 
             if (!reticleGroup) {
                 reticleGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
                 reticleGroup.classList.add('reticle-group');
-                const halfSize = size / 2, lineOffset = 5, centerDotRadius = 3;
-                // Create shapes centered at (0,0)
+                const halfSize = size / 2, lineOffset = 6, centerDotRadius = 3.5;
+
                 const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
                 circle.classList.add('reticle'); circle.setAttribute('r', halfSize);
                 const lineH = document.createElementNS('http://www.w3.org/2000/svg', 'line');
@@ -85,7 +100,7 @@
                 lineV.classList.add('reticle'); lineV.setAttribute('x1', 0); lineV.setAttribute('y1', -halfSize - lineOffset); lineV.setAttribute('x2', 0); lineV.setAttribute('y2', halfSize + lineOffset);
                 const centerDot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
                 centerDot.classList.add('reticle-center-dot'); centerDot.setAttribute('r', centerDotRadius);
-                reticleGroup.append(circle, lineH, lineV, centerDot); // Use append for multiple elements
+                reticleGroup.append(circle, lineH, lineV, centerDot);
                 overlayElement.appendChild(reticleGroup);
             }
             reticleGroup.setAttribute('transform', `translate(${mirroredPixelX}, ${pixelY})`);
@@ -96,32 +111,28 @@
             if (reticleGroup) reticleGroup.style.display = 'none';
         }
 
-        // --- Initialize MediaPipe Face Detector ---
-        async function initializeFaceDetector() {
-            showMessage('얼굴 감지 모델 초기화 중...');
-            console.log('Initializing Face Detector...');
+        // --- Initialize TF.js and Load BlazeFace Model ---
+        async function initializeTfAndModel() {
+            showMessage('TensorFlow.js 및 모델 초기화 중...');
             try {
-                 const vision = await FilesetResolver.forVisionTasks(
-                    // Path to the WASM files (check for latest version/path if needed)
-                    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
-                 );
+                 // Check if libraries are loaded
+                 if (typeof tf === 'undefined' || typeof blazeface === 'undefined') {
+                     throw new Error('TensorFlow.js 또는 BlazeFace 라이브러리를 로드하지 못했습니다.');
+                 }
+                 // Set TF.js backend (WebGL is usually fastest)
+                 await tf.setBackend('webgl');
+                 await tf.ready(); // Wait for backend to be ready
+                 console.log(`Using TF.js backend: ${tf.getBackend()}`);
 
-                 faceDetector = await FaceDetector.createFromOptions(vision, {
-                    baseOptions: {
-                        modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite`, // Use short range model for speed
-                        delegate: 'GPU' // Use GPU if available, otherwise defaults to CPU
-                    },
-                    runningMode: 'VIDEO', // Important for detectForVideo
-                    // minDetectionConfidence: 0.5 // Default is 0.5
-                 });
-                 await faceDetector.setOptions({ runningMode: "VIDEO" }); // Ensure running mode is set
-                 isDetectorReady = true; // Set flag
+                 // Load the BlazeFace model
+                 model = await blazeface.load();
+                 isModelReady = true;
                  showMessage('모델 준비 완료. 카메라 시작 중...');
-                 console.log('Face Detector initialized successfully.');
+                 console.log('BlazeFace model loaded successfully.');
                  return true;
             } catch (error) {
-                showMessage(`모델 초기화 실패: ${error.message}<br>브라우저 콘솔을 확인하세요.`, true);
-                return false;
+                 showMessage(`모델 초기화 실패: ${error.message}<br>CDN 로드 또는 WebGL 지원을 확인하세요.`, true);
+                 return false;
             }
         }
 
@@ -134,27 +145,35 @@
             try {
                 showMessage('카메라 접근 권한 요청 중...');
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+                    video: { width: { exact: 640 }, height: { exact: 480 }, facingMode: 'user' }, // Request specific size
                     audio: false
                 });
                 videoElement.srcObject = stream;
-                videoElement.addEventListener('loadeddata', () => { // Use 'loadeddata' which fires when the first frame is available
-                    videoWidth = videoElement.videoWidth;
-                    videoHeight = videoElement.videoHeight;
-                    containerElement.style.width = `${videoWidth}px`;
-                    containerElement.style.height = `${videoHeight}px`;
-                    overlayElement.setAttribute('viewBox', `0 0 ${videoWidth} ${videoHeight}`);
-                    console.log(`카메라 시작됨. 비디오 크기: ${videoWidth}x${videoHeight}`);
-                    showMessage('카메라 준비 완료. 감지 시작.');
-                     setTimeout(hideMessage, 1500); // Hide message after a short delay
-                    // Start the prediction loop
-                    requestAnimationFrame(predictWebcam);
+
+                // Wait for video metadata to load to get dimensions correctly
+                return new Promise((resolve) => {
+                    videoElement.onloadedmetadata = () => {
+                        videoWidth = videoElement.videoWidth;
+                        videoHeight = videoElement.videoHeight;
+                        // Ensure container and overlay match video dimensions
+                        containerElement.style.width = `${videoWidth}px`;
+                        containerElement.style.height = `${videoHeight}px`;
+                        overlayElement.setAttribute('viewBox', `0 0 ${videoWidth} ${videoHeight}`);
+                        console.log(`카메라 시작됨. 비디오 크기: ${videoWidth}x${videoHeight}`);
+                        showMessage('카메라 준비 완료. 감지 시작.');
+                        setTimeout(hideMessage, 1500);
+                        resolve(true); // Webcam started successfully
+                    };
+                    videoElement.onerror = (e) => {
+                         showMessage(`비디오 오류: ${e.message || '알 수 없는 오류'}`, true);
+                         resolve(false); // Webcam failed
+                     }
                 });
-                return true;
             } catch (error) {
                  let msg = `카메라 접근 실패: ${error.name} - ${error.message}`;
-                 if (error.name === "NotAllowedError") msg = "카메라 접근 권한이 거부되었습니다. 권한을 허용해주세요.";
-                 else if (error.name === "NotFoundError") msg = "사용 가능한 카메라를 찾을 수 없습니다.";
+                 if (error.name === "NotAllowedError") msg = "카메라 접근 권한이 거부되었습니다.";
+                 else if (error.name === "NotFoundError") msg = "지정한 해상도(640x480)를 지원하는 카메라를 찾을 수 없습니다.";
+                 else if (error.name === "OverconstrainedError") msg = "지정한 해상도(640x480)를 카메라가 지원하지 않습니다.";
                  showMessage(msg, true);
                  return false;
             }
@@ -162,53 +181,62 @@
 
         // --- Prediction Loop ---
         async function predictWebcam() {
-             // Check if detector is ready and video has data
-            if (!isDetectorReady || videoElement.readyState < 2) { // readyState < 2 means not enough data
+            if (!isModelReady || videoElement.readyState < videoElement.HAVE_METADATA) { // Check if model and video metadata are ready
+                requestAnimationFrame(predictWebcam); // Wait
+                return;
+            }
+
+            // Throttle prediction if video frame hasn't changed
+            if (videoElement.currentTime === lastVideoTime) {
                  requestAnimationFrame(predictWebcam);
                  return;
             }
+            lastVideoTime = videoElement.currentTime;
 
-            // Only run detection if the video frame has changed
-             if (videoElement.currentTime !== lastVideoTime) {
-                 lastVideoTime = videoElement.currentTime;
-                 try {
-                     // Detect faces using detectForVideo
-                     detectionResults = faceDetector.detectForVideo(videoElement, performance.now());
+            try {
+                // tf.tidy helps manage WebGL memory by disposing intermediate tensors
+                tf.tidy(() => {
+                    // Get predictions. The second argument `false` = don't flip horizontally, third `false` = don't return tensors
+                    const predictions = model.estimateFaces(videoElement, false, false);
 
-                     // Process results
-                     if (detectionResults && detectionResults.detections && detectionResults.detections.length > 0) {
-                         const detection = detectionResults.detections[0]; // Use the first detected face
-                         const boundingBox = detection.boundingBox;
-                         if (boundingBox) {
-                             // Calculate normalized center
-                             const centerX = boundingBox.originX + boundingBox.width / 2;
-                             const centerY = boundingBox.originY + boundingBox.height / 2;
-                             updateReticle(centerX, centerY);
-                         } else {
-                             hideReticle();
-                         }
-                     } else {
-                         hideReticle();
-                     }
-                 } catch (error) {
-                      console.error("Error during face detection:", error);
-                      hideReticle(); // Hide reticle on error
-                 }
-             }
+                    if (predictions && predictions.length > 0) {
+                        // Use the first detected face
+                        const face = predictions[0];
+                        const topLeft = face.topLeft; // [x, y]
+                        const bottomRight = face.bottomRight; // [x, y]
 
-            // Call recursively for the next frame
-            requestAnimationFrame(predictWebcam);
+                        // Calculate center coordinates in pixels (relative to original video frame)
+                        const centerX = topLeft[0] + (bottomRight[0] - topLeft[0]) / 2;
+                        const centerY = topLeft[1] + (bottomRight[1] - topLeft[1]) / 2;
+
+                        // Update reticle with pixel coordinates (mirroring handled inside)
+                        updateReticle(centerX, centerY);
+
+                    } else {
+                        hideReticle(); // No face detected
+                    }
+                }); // End tf.tidy
+
+            } catch (error) {
+                 console.error("Error during face detection:", error);
+                 hideReticle();
+            }
+
+            requestAnimationFrame(predictWebcam); // Loop
         }
 
         // --- Main Execution ---
         async function run() {
-            showMessage('페이지 로딩 완료. 초기화 시작...');
-            const detectorInitialized = await initializeFaceDetector();
-            if (detectorInitialized) {
-                await startWebcam();
-                // Webcam start handles kicking off the prediction loop
+            showMessage('애플리케이션 초기화 시작...');
+            const modelInitialized = await initializeTfAndModel();
+            if (modelInitialized) {
+                const webcamStarted = await startWebcam();
+                if (webcamStarted) {
+                    // Start the prediction loop once webcam is ready
+                    requestAnimationFrame(predictWebcam);
+                }
             }
-            // Error messages are handled within the functions
+            // Error messages displayed within the functions
         }
 
         // Run after DOM is loaded
@@ -216,12 +244,5 @@
 
     </script>
 
-</head>
-<body>
-    <div id="container">
-        <video id="webcam" autoplay muted playsinline></video>
-        <svg id="overlay"></svg>
-        <div id="message">페이지 로딩 중...</div>
-    </div>
 </body>
 </html>
