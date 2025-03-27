@@ -3,257 +3,78 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Face Aiming Reticle</title>
+    <title>Face Aiming Reticle (MediaPipe)</title>
     <style>
         body {
-            margin: 0;
-            padding: 0;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            background-color: #222;
-            overflow: hidden; /* 스크롤 방지 */
+            margin: 0; padding: 0; display: flex; justify-content: center; align-items: center;
+            min-height: 100vh; background-color: #222; overflow: hidden;
         }
-
         #container {
-            position: relative;
-            width: 640px; /* 웹캠 기본 해상도에 맞춤 */
-            height: 480px;
-            border: 2px solid #555;
-            background-color: #000; /* 비디오 로딩 중 배경 */
-            overflow: hidden; /* 내부 요소가 넘치지 않도록 */
+            position: relative; width: 640px; height: 480px;
+            border: 2px solid #555; background-color: #000; overflow: hidden;
         }
-
         #webcam {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            /* 좌우 반전 (거울 모드) */
-            transform: scaleX(-1);
-            object-fit: cover; /* 컨테이너에 맞게 비디오 채우기 */
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            transform: scaleX(-1); /* Mirror mode */
+            object-fit: cover;
         }
-
         #overlay {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            /* 비디오 위에 오도록 z-index 설정 */
-            z-index: 10;
-            pointer-events: none; /* SVG 아래 비디오 클릭 방지 */
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            z-index: 10; pointer-events: none;
         }
+        /* Reticle Styles */
+        .reticle { stroke: rgba(255, 0, 0, 0.8); stroke-width: 2; fill: none; }
+        .reticle-center-dot { fill: rgba(255, 0, 0, 0.9); }
+        .reticle-group { transition: transform 0.05s linear; }
 
-        /* 조준점 스타일 */
-        .reticle {
-            stroke: rgba(0, 255, 0, 0.8); /* 녹색 */
-            stroke-width: 2;
-            fill: none;
-        }
-        .reticle-center-dot {
-            fill: rgba(0, 255, 0, 0.9); /* 녹색 */
-        }
-        .reticle-group {
-             transition: transform 0.05s linear; /* 그룹 전체에 부드러운 이동 적용 */
-        }
-
-        /* 로딩 및 오류 메시지 */
-         #loadingMessage, #errorMessage {
-            position: absolute;
-            left: 50%;
-            top: 50%;
-            transform: translate(-50%, -50%);
-            color: white;
-            font-size: 1.1em; /* 약간 줄임 */
-            background-color: rgba(0, 0, 0, 0.75);
-            padding: 15px;
-            border-radius: 5px;
-            z-index: 20;
-            text-align: center;
-            display: none; /* 기본 숨김 */
-            max-width: 80%; /* 너무 길어지지 않게 */
+        /* Loading/Error Messages */
+         #message {
+            position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+            color: white; font-size: 1.1em; background-color: rgba(0, 0, 0, 0.75);
+            padding: 15px; border-radius: 5px; z-index: 20; text-align: center;
+            display: block; /* Initially visible */ max-width: 80%;
          }
-         #errorMessage {
-             background-color: rgba(200, 0, 0, 0.8); /* 빨간 배경 */
-             top: auto; /* 상단 대신 중앙에 고정 */
-             bottom: auto;
-             /* left: 10px; bottom: 10px; 이 위치 대신 중앙 사용 */
-         }
+         #message.error { background-color: rgba(200, 0, 0, 0.8); }
     </style>
-</head>
-<body>
-    <div id="container">
-        <video id="webcam" autoplay muted playsinline></video>
-        <svg id="overlay"></svg>
-        <div id="loadingMessage">초기화 중...</div>
-        <div id="errorMessage"></div>
-    </div>
 
-    <!-- face-api.js 라이브러리 로드 -->
-    <script defer src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+    <!-- MediaPipe Face Detector and Camera Utils -->
+    <script type="module">
+        // Import necessary modules directly from CDN
+        import { FaceDetector, FilesetResolver } from 'https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4/face_detection.js';
+        import { Camera } from 'https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js';
+        // Drawing utils are optional, not used for the reticle here
+        // import { drawRectangle } from 'https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3/drawing_utils.js';
 
-    <script>
-        const video = document.getElementById('webcam');
-        const overlay = document.getElementById('overlay');
-        const loadingMessage = document.getElementById('loadingMessage');
-        const errorMessage = document.getElementById('errorMessage');
-        const container = document.getElementById('container');
+        const videoElement = document.getElementById('webcam');
+        const overlayElement = document.getElementById('overlay');
+        const messageElement = document.getElementById('message');
+        const containerElement = document.getElementById('container');
         let reticleGroup = null;
-        let modelsLoaded = false;
-        let detectionInterval;
-        let isDetecting = false;
+        let videoWidth = 640;
+        let videoHeight = 480;
 
-        const MODEL_URL = 'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights';
-
-        // 오류 메시지 표시 함수
-        function showError(message, isFatal = false) {
-            errorMessage.innerHTML = message; // innerHTML 사용 가능 (줄바꿈 등 위해)
-            errorMessage.style.display = 'block';
-            loadingMessage.style.display = 'none'; // 로딩 메시지는 숨김
-            console.error(message);
-            if (isFatal) {
-                // 치명적 오류 시 추가 동작 (예: 감지 루프 중단)
-                 if (detectionInterval) clearInterval(detectionInterval);
-            }
+        // --- Message Handling ---
+        function showMessage(msg, isError = false) {
+            messageElement.innerHTML = msg;
+            messageElement.className = isError ? 'error' : '';
+            messageElement.style.display = 'block';
+            if (isError) console.error(msg); else console.log(msg);
+        }
+        function hideMessage() {
+            messageElement.style.display = 'none';
         }
 
-        // 메시지 표시 함수 (로딩 또는 정보)
-        function showMessage(message) {
-            errorMessage.style.display = 'none'; // 오류 메시지 숨김
-            loadingMessage.innerHTML = message;
-            loadingMessage.style.display = 'block';
-        }
+        // --- Reticle Drawing ---
+        function updateReticle(normalizedX, normalizedY, size = 40) {
+            // Convert normalized coords (0.0-1.0) to pixel coords
+            const pixelX = normalizedX * videoWidth;
+            const pixelY = normalizedY * videoHeight;
 
-        // 모델 경로 확인 (네트워크 레벨)
-        async function checkModelPath() {
-            const manifestUrl = `${MODEL_URL}/tiny_face_detector_model-weights_manifest.json`;
-            showMessage(`모델 경로 확인 중...<br>${manifestUrl}`);
-            console.log(`Attempting to fetch manifest: ${manifestUrl}`);
-            try {
-                const response = await fetch(manifestUrl, { method: 'HEAD' }); // HEAD 요청으로 존재 여부만 확인
-                if (!response.ok) {
-                    // 상태 코드가 2xx가 아니면 오류 발생
-                     throw new Error(`HTTP error! status: ${response.status} (${response.statusText})`);
-                }
-                console.log('모델 매니페스트 파일 접근 가능 확인.');
-                return true;
-            } catch (error) {
-                console.error('모델 매니페스트 파일 fetch 실패:', error);
-                showError(`오류: 모델 파일 경로(${manifestUrl}) 접근 불가.<br>네트워크 연결 또는 CDN 주소를 확인하세요.<br><small>${error.message}</small>`, true);
-                return false;
-            }
-        }
-
-
-        // face-api 모델 로드
-        async function loadModels() {
-            showMessage('얼굴 인식 모델 로딩 중...');
-            console.log('face-api 모델 로딩 시작...');
-            try {
-                // faceapi 객체 존재 및 loadFromUri 함수 확인
-                if (typeof faceapi === 'undefined' || typeof faceapi.nets?.tinyFaceDetector?.loadFromUri !== 'function') {
-                    throw new Error('face-api.js 라이브러리가 올바르게 로드되지 않았거나 필요한 함수가 없습니다.');
-                }
-
-                // 실제 모델 로드
-                await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-                console.log('TinyFaceDetector 모델 로딩 완료');
-
-                // 필요한 다른 모델도 여기에 추가 (예: 랜드마크)
-                // await faceapi.nets.faceLandmark68TinyNet.loadFromUri(MODEL_URL);
-                // console.log('FaceLandmark68TinyNet 모델 로딩 완료');
-
-                modelsLoaded = true; // 모델 로드 성공
-                showMessage('모델 로딩 완료. 카메라 준비 중...');
-                return true;
-            } catch (error) {
-                // loadFromUri 내부의 fetch 오류 포함하여 모든 오류 처리
-                 console.error('모델 로딩 중 오류 발생:', error);
-                 // 오류 메시지에서 fetch 관련 404 오류인지 확인
-                 let errorMsg = `모델 로딩 실패: ${error.message}`;
-                 if (error.message.includes('failed to fetch') && error.message.includes('404')) {
-                     errorMsg += `<br>지정한 모델 경로(${MODEL_URL})에 파일이 없거나 접근할 수 없습니다. CDN 주소를 확인하세요.`;
-                 } else if (error.message.includes('face-api.js')) {
-                     errorMsg += `<br>face-api.js 라이브러리 로드에 문제가 있을 수 있습니다.`;
-                 }
-                showError(errorMsg, true); // 치명적 오류로 처리
-                modelsLoaded = false;
-                return false;
-            }
-        }
-
-        // 웹캠 시작
-        async function startWebcam() {
-            showMessage('카메라 접근 시도 중...');
-            console.log('웹캠 시작 시도...');
-            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                 showError('오류: 사용자의 브라우저가 웹캠 접근(getUserMedia)을 지원하지 않습니다.', true);
-                 return false;
-            }
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: {
-                        width: { ideal: 640 },
-                        height: { ideal: 480 },
-                        facingMode: 'user'
-                    },
-                    audio: false
-                });
-                video.srcObject = stream;
-                console.log('카메라 스트림 가져옴');
-
-                return new Promise((resolve) => {
-                    video.onloadedmetadata = () => {
-                        console.log(`비디오 메타데이터 로드됨: ${video.videoWidth}x${video.videoHeight}`);
-                        overlay.setAttribute('viewBox', `0 0 ${video.videoWidth} ${video.videoHeight}`);
-                    };
-                    video.oncanplay = () => console.log('비디오 재생 준비 완료 (canplay)');
-
-                    video.addEventListener('play', () => {
-                        console.log('비디오 재생 시작됨 (play 이벤트)');
-                        if (modelsLoaded) {
-                            showMessage('카메라 준비 완료. 얼굴 감지 시작.');
-                            // 로딩 메시지 잠시 후 숨기기
-                             setTimeout(() => { loadingMessage.style.display = 'none'; }, 1500);
-                            errorMessage.style.display = 'none';
-                            startDetectionLoop();
-                        } else {
-                            showError("오류: 모델 준비 전 비디오 재생 시작됨.", true);
-                        }
-                        resolve(true);
-                    }, { once: true });
-
-                    video.onerror = (e) => {
-                         showError(`비디오 오류 발생: ${e.message || '알 수 없는 비디오 오류'}`, true);
-                         resolve(false);
-                     };
-                });
-
-            } catch (error) {
-                let message = '웹캠 접근 실패: ';
-                if (error.name === 'NotAllowedError') {
-                    message += '카메라 접근 권한이 거부되었습니다. 권한을 허용하고 새로고침해주세요.';
-                } else if (error.name === 'NotFoundError') {
-                    message += '사용 가능한 카메라를 찾을 수 없습니다. 연결 상태를 확인하세요.';
-                } else if (error.name === 'NotReadableError') {
-                     message += '카메라를 사용할 수 없습니다. 다른 앱에서 사용 중인지 확인하세요.';
-                } else {
-                    message += error.message;
-                }
-                showError(message, true);
-                return false;
-            }
-        }
-
-        // SVG 조준점 업데이트
-        function updateReticle(x, y, size = 40) {
-            const svgWidth = overlay.clientWidth || 640;
-            const mirroredX = svgWidth - x; // X좌표 미러링
+            // Mirror the X coordinate for display on the flipped video
+            const mirroredPixelX = videoWidth - pixelX;
 
             if (!reticleGroup) {
+                // Create reticle elements if they don't exist
                 reticleGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
                 reticleGroup.classList.add('reticle-group');
 
@@ -261,23 +82,20 @@
                 const lineOffset = 5;
                 const centerDotRadius = 3;
 
+                // Define shapes relative to the center (0,0) of the group
                 const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
                 circle.classList.add('reticle');
                 circle.setAttribute('r', halfSize);
 
                 const lineH = document.createElementNS('http://www.w3.org/2000/svg', 'line');
                 lineH.classList.add('reticle');
-                lineH.setAttribute('x1', -halfSize - lineOffset);
-                lineH.setAttribute('y1', 0);
-                lineH.setAttribute('x2', halfSize + lineOffset);
-                lineH.setAttribute('y2', 0);
+                lineH.setAttribute('x1', -halfSize - lineOffset); lineH.setAttribute('y1', 0);
+                lineH.setAttribute('x2', halfSize + lineOffset); lineH.setAttribute('y2', 0);
 
                 const lineV = document.createElementNS('http://www.w3.org/2000/svg', 'line');
                 lineV.classList.add('reticle');
-                lineV.setAttribute('x1', 0);
-                lineV.setAttribute('y1', -halfSize - lineOffset);
-                lineV.setAttribute('x2', 0);
-                lineV.setAttribute('y2', halfSize + lineOffset);
+                lineV.setAttribute('x1', 0); lineV.setAttribute('y1', -halfSize - lineOffset);
+                lineV.setAttribute('x2', 0); lineV.setAttribute('y2', halfSize + lineOffset);
 
                 const centerDot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
                 centerDot.classList.add('reticle-center-dot');
@@ -287,76 +105,121 @@
                 reticleGroup.appendChild(lineH);
                 reticleGroup.appendChild(lineV);
                 reticleGroup.appendChild(centerDot);
-                overlay.appendChild(reticleGroup);
+                overlayElement.appendChild(reticleGroup);
             }
-            reticleGroup.setAttribute('transform', `translate(${mirroredX}, ${y})`);
-            reticleGroup.style.display = '';
+
+            // Update the position using transform
+            reticleGroup.setAttribute('transform', `translate(${mirroredPixelX}, ${pixelY})`);
+            reticleGroup.style.display = ''; // Make sure it's visible
         }
 
-        // 조준점 숨기기
         function hideReticle() {
-             if (reticleGroup) reticleGroup.style.display = 'none';
+            if (reticleGroup) {
+                reticleGroup.style.display = 'none';
+            }
         }
 
-        // 얼굴 감지 및 조준점 그리기
-        async function detectAndDraw() {
-            if (!modelsLoaded || video.paused || video.ended || !video.videoWidth || isDetecting) {
-                return; // 조건 안 맞거나 이미 감지 중이면 중단
+        // --- MediaPipe Face Detection ---
+        function onResults(results) {
+            // results object contains detections
+            if (!results.detections || results.detections.length === 0) {
+                 // console.log('No face detected');
+                hideReticle();
+                return;
             }
-            isDetecting = true;
 
+            // Assuming we use the first detected face
+            const detection = results.detections[0];
+
+            // The bounding box contains normalized coordinates
+            const boundingBox = detection.boundingBox;
+            if (!boundingBox) {
+                hideReticle();
+                return;
+            }
+
+            // Calculate normalized center of the bounding box
+            const centerX = boundingBox.originX + boundingBox.width / 2;
+            const centerY = boundingBox.originY + boundingBox.height / 2;
+
+            // Update reticle position with normalized coordinates
+            updateReticle(centerX, centerY);
+
+            // Hide loading message once detection starts working
+            if (messageElement.style.display !== 'none' && !messageElement.classList.contains('error')) {
+                 setTimeout(hideMessage, 1000); // Hide after 1 second
+            }
+        }
+
+        async function initializeMediaPipe() {
+            showMessage('MediaPipe 리소스 로딩 중...');
             try {
-                const detectorOptions = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 });
-                const detections = await faceapi.detectAllFaces(video, detectorOptions);
+                 // 1. Initialize FilesetResolver to locate WASM files
+                 const filesetResolver = await FilesetResolver.forVisionTasks(
+                     'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm' // Check for latest path if needed
+                 );
 
-                if (detections && detections.length > 0) {
-                    // const detection = detections.sort((a,b) => b.box.area - a.box.area)[0]; // 가장 큰 얼굴
-                    const detection = detections[0]; // 첫 번째 얼굴
-                    const box = detection.box;
-                    const centerX = box.x + box.width / 2;
-                    const centerY = box.y + box.height / 2;
-                    updateReticle(centerX, centerY);
-                } else {
-                     hideReticle();
-                }
+                 // 2. Create FaceDetector instance
+                 const faceDetector = new FaceDetector(filesetResolver, {
+                    runningMode: 'VIDEO', // Process video stream
+                    // model: 'short', // or 'full'; 'short' is faster for closer faces
+                    // minDetectionConfidence: 0.5 // Adjust confidence threshold if needed
+                 });
+
+                await faceDetector.setOptions({ model: 'short', minDetectionConfidence: 0.5 });
+
+                showMessage('MediaPipe 로드 완료. 카메라 준비 중...');
+
+                // 3. Setup Camera Utils
+                const camera = new Camera(videoElement, {
+                    onFrame: async () => {
+                        // Called for each video frame
+                        await faceDetector.detectForVideo(videoElement, performance.now(), onResults);
+                    },
+                    width: videoWidth,
+                    height: videoHeight
+                });
+
+                // 4. Start the camera
+                await camera.start();
+                showMessage('카메라 시작됨. 얼굴을 보여주세요.');
+
             } catch (error) {
-                 console.error("얼굴 감지 중 오류:", error);
-                 // 감지 루프는 계속 돌도록 치명적 오류로 처리하지 않음
-                 // showError(`감지 오류: ${error.message}`); // 너무 자주 뜨면 방해될 수 있음
-                 hideReticle();
-            } finally {
-                isDetecting = false;
+                 showMessage(`초기화 실패: ${error.message}`, true);
             }
         }
 
-        // 얼굴 감지 루프 시작
-        function startDetectionLoop() {
-             const intervalMs = 1000 / 15; // 약 15 FPS
-             if (detectionInterval) clearInterval(detectionInterval);
-             detectionInterval = setInterval(detectAndDraw, intervalMs);
-             console.log(`얼굴 감지 루프 시작 (간격: ${intervalMs.toFixed(0)}ms)`);
-        }
 
-        // 메인 실행 로직
-        async function run() {
-            showMessage('애플리케이션 초기화 중...');
+        // --- Run Initialization ---
+        // Wait for the video element metadata to load to get dimensions
+        videoElement.onloadedmetadata = () => {
+            console.log('비디오 메타데이터 로드됨.');
+            videoWidth = videoElement.videoWidth;
+            videoHeight = videoElement.videoHeight;
+            // Adjust container and SVG if needed based on actual video size
+            containerElement.style.width = `${videoWidth}px`;
+            containerElement.style.height = `${videoHeight}px`;
+            overlayElement.setAttribute('viewBox', `0 0 ${videoWidth} ${videoHeight}`);
+            console.log(`비디오 크기 설정: ${videoWidth}x${videoHeight}`);
 
-            // 1. 모델 경로 확인
-            const pathOk = await checkModelPath();
-            if (!pathOk) return; // 경로 문제 시 중단
+            // Now initialize MediaPipe
+            initializeMediaPipe();
+        };
 
-            // 2. 모델 로딩 시도
-            const modelsReady = await loadModels();
-            if (!modelsReady) return; // 모델 로딩 실패 시 중단
-
-            // 3. 웹캠 시작 시도
-            await startWebcam();
-            // 웹캠 성공 시 내부에서 감지 루프 시작
-        }
-
-        // DOM 로드 후 실행
-        document.addEventListener('DOMContentLoaded', run);
+        // Handle potential video loading errors
+         videoElement.onerror = (e) => {
+             showMessage(`비디오 로드 오류: ${e.message || '알 수 없는 오류'}. 카메라 연결 및 권한을 확인하세요.`, true);
+         };
 
     </script>
+
+</head>
+<body>
+    <div id="container">
+        <!-- Video element needs to be present before script runs -->
+        <video id="webcam" autoplay muted playsinline></video>
+        <svg id="overlay"></svg>
+        <div id="message">페이지 로딩 중...</div>
+    </div>
 </body>
 </html>
