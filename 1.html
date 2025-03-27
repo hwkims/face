@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>얼굴/눈 인식 & 사운드 컨트롤 (v4)</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; margin: 0; padding: 20px; background-color: #f0f0f0; }
+        #container { position: relative; width: 640px; height: 480px; border: 1px solid black; margin-bottom: 15px; background-color: #333; overflow: hidden; }
+        #video { display: none; width: 100%; height: 100%; transform: scaleX(-1); }
+        #canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; transform: scaleX(-1); }
+        #controls { margin-bottom: 10px; display: flex; align-items: center; gap: 10px; }
+        #status { font-weight: bold; color: #333; margin-bottom: 10px; min-height: 1.2em; }
+        p { text-align: center; }
+    </style>
+    <!-- 라이브러리 로드 (이전과 동일) -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/face-landmarks-detection"></script>
+</head>
+<body>
+    <h1>얼굴/눈 인식 & 사운드 컨트롤 (v4)</h1>
+    <p>카메라에 얼굴을 보여주세요.<br>입을 벌리면 소리 높낮이가 변하고, 눈을 깜빡이면 '뿅' 소리가 납니다.</p>
+
+    <div id="container">
+        <video id="video" playsinline></video>
+        <canvas id="canvas"></canvas>
+    </div>
+    <div id="controls">
+        <label for="blinkSensitivity">눈 깜빡임 민감도:</label>
+        <input type="range" id="blinkSensitivity" min="3" max="15" value="6" step="0.5">
+        <span id="sensitivityValue">6</span>
+    </div>
+    <div id="status">초기화 중...</div>
+
+    <script>
+        console.log("스크립트 시작 (v4)");
+
+        // --- DOM 요소 ---
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const statusDiv = document.getElementById('status');
+        const blinkSensitivitySlider = document.getElementById('blinkSensitivity');
+        const sensitivityValueSpan = document.getElementById('sensitivityValue');
+
+        // --- 모델 및 상태 변수 ---
+        let detector;
+        let faceTriangulation = null;
+        let faceDetectedLastFrame = false;
+
+        // --- 오디오 관련 변수 ---
+        let audioContext;
+        let mouthOscillator;
+        let mouthGainNode;
+        let isAudioSetup = false;
+        let isMouthAudioPlaying = false;
+
+        // --- 오디오 설정 값 ---
+        const minMouthOpenDist = 3;
+        const maxMouthOpenDist = 35;
+        const minFreq = 110; // A2
+        const maxFreq = 880; // A5
+        let eyeBlinkThreshold = parseFloat(blinkSensitivitySlider.value); // 초기값 설정
+        const BLINK_SOUND_FREQ = 1200;
+        const BLINK_SOUND_DURATION = 0.08;
+        let canPlayBlinkSound = true;
+        const blinkSoundCooldown = 300;
+
+        // --- 랜드마크 인덱스 ---
+        const LandmarkIndices = {
+            UPPER_LIP_CENTER: 13, LOWER_LIP_CENTER: 14,
+            LEFT_EYE_TOP: 159, LEFT_EYE_BOTTOM: 145,
+            RIGHT_EYE_TOP: 386, RIGHT_EYE_BOTTOM: 374,
+        };
+
+        // --- 슬라이더 이벤트 리스너 ---
+        blinkSensitivitySlider.addEventListener('input', (event) => {
+            eyeBlinkThreshold = parseFloat(event.target.value);
+            sensitivityValueSpan.textContent = eyeBlinkThreshold.toFixed(1);
+            console.log("눈 깜빡임 임계값 변경:", eyeBlinkThreshold);
+        });
+
+        // --- 오디오 초기화 ---
+        function initAudio() { /* 이전과 동일 */
+            console.log("initAudio 시작"); try { window.AudioContext = window.AudioContext || window.webkitAudioContext; audioContext = new AudioContext(); console.log("AudioContext 생성됨, 상태:", audioContext.state); mouthOscillator = audioContext.createOscillator(); mouthGainNode = audioContext.createGain(); mouthOscillator.type = 'sine'; mouthOscillator.frequency.setValueAtTime(minFreq, audioContext.currentTime); mouthGainNode.gain.setValueAtTime(0, audioContext.currentTime); mouthOscillator.connect(mouthGainNode); mouthGainNode.connect(audioContext.destination); isAudioSetup = true; console.log("오디오 노드 설정 완료"); document.body.addEventListener('click', resumeAudioContext, { once: true }); } catch (e) { console.error("오디오 초기화 실패:", e); statusDiv.innerText = "오류: 오디오 초기화 실패."; isAudioSetup = false; }
+        }
+
+        // --- 오디오 컨텍스트 재개 ---
+        function resumeAudioContext() { /* 이전과 동일, 로그 추가 */
+            if (!audioContext) return; console.log("resumeAudioContext 호출됨, 현재 상태:", audioContext.state); if (audioContext.state === 'suspended') { audioContext.resume().then(() => { console.log('AudioContext 재개 성공, 새 상태:', audioContext.state); startMouthOscillatorIfNeeded(); }).catch(e => console.error('AudioContext 재개 오류:', e)); } else if (isAudioSetup && audioContext.state === 'running') { startMouthOscillatorIfNeeded(); }
+        }
+
+        // --- 입 오실레이터 시작 ---
+        function startMouthOscillatorIfNeeded() { /* 이전과 동일, 로그 추가 */
+            if (isAudioSetup && !isMouthAudioPlaying) { try { mouthOscillator.start(); isMouthAudioPlaying = true; console.log("입 오실레이터 시작됨."); } catch (startError) { console.error("입 오실레이터 시작 오류:", startError); if (startError.message.includes("already started")) isMouthAudioPlaying = true; } }
+        }
+
+        // --- 메인 오디오 제어 ---
+        function controlMainAudio(start) {
+            if (!isAudioSetup || !isMouthAudioPlaying || !mouthGainNode) {
+                console.log(`controlMainAudio(${start}): 오디오 준비 안됨`);
+                return;
+            }
+            const targetGain = start ? 0.5 : 0;
+            const duration = start ? 0.1 : 0.2;
+             // 현재 게인 값과 타겟 게인 값 확인 (디버깅용)
+            // console.log(`controlMainAudio(${start}): Current Gain: ${mouthGainNode.gain.value.toFixed(2)}, Target: ${targetGain}`);
+            mouthGainNode.gain.setTargetAtTime(targetGain, audioContext.currentTime, duration);
+            console.log(`메인 오디오 ${start ? '시작' : '중지'} (볼륨 -> ${targetGain})`);
+        }
+
+        // --- 입 주파수 업데이트 ---
+        function updateMouthFrequency(mouthOpenDistance) {
+            if (!isAudioSetup || !isMouthAudioPlaying) return;
+            let normalizedDist = (mouthOpenDistance - minMouthOpenDist) / (maxMouthOpenDist - minMouthOpenDist);
+            normalizedDist = Math.max(0, Math.min(1, normalizedDist));
+            const frequency = minFreq + normalizedDist * (maxFreq - minFreq);
+            // console.log(`입 거리: ${mouthOpenDistance.toFixed(1)}, 주파수: ${frequency.toFixed(1)}`); // 확인 후 주석 처리
+            mouthOscillator.frequency.setTargetAtTime(frequency, audioContext.currentTime, 0.05);
+        }
+
+        // --- 눈 깜빡임 소리 재생 ---
+        function playBlinkSound() { /* 이전과 동일 */
+            if (!isAudioSetup || !canPlayBlinkSound || !audioContext || audioContext.state !== 'running') { if (audioContext && audioContext.state === 'suspended') console.log("Blink: AC suspended, click needed"); return; } canPlayBlinkSound = false; const blinkOscillator = audioContext.createOscillator(); const blinkGainNode = audioContext.createGain(); blinkOscillator.type = 'triangle'; blinkOscillator.frequency.setValueAtTime(BLINK_SOUND_FREQ, audioContext.currentTime); blinkGainNode.gain.setValueAtTime(0, audioContext.currentTime); blinkGainNode.gain.linearRampToValueAtTime(0.6, audioContext.currentTime + BLINK_SOUND_DURATION * 0.2); blinkGainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + BLINK_SOUND_DURATION); blinkOscillator.connect(blinkGainNode); blinkGainNode.connect(audioContext.destination); blinkOscillator.start(audioContext.currentTime); blinkOscillator.stop(audioContext.currentTime + BLINK_SOUND_DURATION); blinkOscillator.onended = () => { blinkOscillator.disconnect(); blinkGainNode.disconnect(); setTimeout(() => { canPlayBlinkSound = true; }, blinkSoundCooldown); };
+        }
+
+        // --- 카메라 설정 ---
+        async function setupCamera() { /* 이전과 동일 */
+            console.log("setupCamera 시작"); statusDiv.innerText = "카메라 접근 중..."; try { const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false }); video.srcObject = stream; console.log("카메라 스트림 획득"); await new Promise((resolve) => { video.onloadedmetadata = () => { console.log("비디오 메타데이터 로드됨"); video.width = video.videoWidth; video.height = video.videoHeight; canvas.width = video.videoWidth; canvas.height = video.videoHeight; resolve(video); }; }); return true; } catch (error) { console.error("카메라 설정 실패:", error); statusDiv.innerText = "오류: 카메라 접근 실패. 권한을 확인하세요."; alert("카메라 접근 권한을 허용해주세요."); return false; }
+        }
+
+        // --- 모델 로드 ---
+        async function loadModel() { /* 이전과 동일 */
+            console.log("loadModel 시작"); statusDiv.innerText = "모델 로딩 중..."; try { await tf.ready(); const model = faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh; const detectorConfig = { runtime: 'tfjs', refineLandmarks: true, maxFaces: 1 }; detector = await faceLandmarksDetection.createDetector(model, detectorConfig); if (faceLandmarksDetection.util && faceLandmarksDetection.util.TRIANGULATION) { faceTriangulation = faceLandmarksDetection.util.TRIANGULATION; console.log("얼굴 메쉬 TRIANGULATION 데이터 확보 성공"); } else { console.warn("TRIANGULATION 데이터를 찾을 수 없습니다. 메쉬 그리기가 비활성화됩니다."); } console.log("모델 로드 성공"); statusDiv.innerText = "모델 로드 완료."; return true; } catch (error) { console.error("모델 로드 실패:", error); statusDiv.innerText = "오류: 모델 로드 실패."; detector = null; return false; }
+        }
+
+        // --- 얼굴 메쉬 그리기 ---
+        function drawFaceMesh(keypoints) { /* 이전과 동일 */
+             if (!faceTriangulation) { ctx.fillStyle = 'rgba(0, 255, 0, 0.7)'; for(const kp of keypoints) { if (kp.x && kp.y) { ctx.beginPath(); ctx.arc(kp.x, kp.y, 1, 0, 2 * Math.PI); ctx.fill(); } } return; } ctx.strokeStyle = 'rgba(0, 255, 0, 0.5)'; ctx.lineWidth = 0.5; for (let i = 0; i < faceTriangulation.length / 3; i++) { const kptIndex1 = faceTriangulation[i * 3], kptIndex2 = faceTriangulation[i * 3 + 1], kptIndex3 = faceTriangulation[i * 3 + 2]; const kp1 = keypoints[kptIndex1], kp2 = keypoints[kptIndex2], kp3 = keypoints[kptIndex3]; if (kp1 && kp2 && kp3) { ctx.beginPath(); ctx.moveTo(kp1.x, kp1.y); ctx.lineTo(kp2.x, kp2.y); ctx.lineTo(kp3.x, kp3.y); ctx.closePath(); ctx.stroke(); } }
+        }
+
+        // --- 감지 및 그리기 루프 ---
+        let frameCount = 0; // 디버깅 로그 조절용
+
+        async function detectionLoop() {
+            if (!detector || video.readyState < 3) {
+                requestAnimationFrame(detectionLoop);
+                return;
+            }
+            frameCount++;
+            let faceDetectedThisFrame = false;
+
+            try {
+                const faces = await detector.estimateFaces(video, { flipHorizontal: false });
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                if (faces && faces.length > 0) {
+                    const face = faces[0];
+                    if (face.keypoints && face.keypoints.length > 400) {
+                        faceDetectedThisFrame = true;
+                        drawFaceMesh(face.keypoints);
+
+                        // 입 벌림 감지 및 주파수 업데이트
+                        const upperLip = face.keypoints[LandmarkIndices.UPPER_LIP_CENTER];
+                        const lowerLip = face.keypoints[LandmarkIndices.LOWER_LIP_CENTER];
+                        if (upperLip && lowerLip) {
+                            const mouthDist = Math.sqrt(Math.pow(upperLip.x - lowerLip.x, 2) + Math.pow(upperLip.y - lowerLip.y, 2));
+                            updateMouthFrequency(mouthDist); // 얼굴 감지 시 항상 주파수 업데이트 시도
+                        }
+
+                        // 눈 깜빡임 감지 및 소리 재생
+                        const leftEyeTop = face.keypoints[LandmarkIndices.LEFT_EYE_TOP];
+                        const leftEyeBottom = face.keypoints[LandmarkIndices.LEFT_EYE_BOTTOM];
+                        const rightEyeTop = face.keypoints[LandmarkIndices.RIGHT_EYE_TOP];
+                        const rightEyeBottom = face.keypoints[LandmarkIndices.RIGHT_EYE_BOTTOM];
+                        if (leftEyeTop && leftEyeBottom && rightEyeTop && rightEyeBottom) {
+                            const leftEyeDist = Math.abs(leftEyeTop.y - leftEyeBottom.y);
+                            const rightEyeDist = Math.abs(rightEyeTop.y - rightEyeBottom.y);
+                            if (frameCount % 60 === 0) { // 1초에 한 번 로그 출력 (튜닝용)
+                                // console.log(`Eye Dist L: ${leftEyeDist.toFixed(1)}, R: ${rightEyeDist.toFixed(1)}, Threshold: ${eyeBlinkThreshold}`);
+                            }
+                            if (leftEyeDist < eyeBlinkThreshold || rightEyeDist < eyeBlinkThreshold) {
+                                playBlinkSound();
+                            }
+                        }
+                    }
+                }
+
+                // 오디오 볼륨 제어 (메인 사인파 On/Off)
+                // 얼굴 감지 상태 변경 시에만 호출
+                if (faceDetectedThisFrame && !faceDetectedLastFrame) {
+                    controlMainAudio(true); // 얼굴 보이면 켜기
+                } else if (!faceDetectedThisFrame && faceDetectedLastFrame) {
+                    controlMainAudio(false); // 얼굴 안 보이면 끄기
+                }
+                faceDetectedLastFrame = faceDetectedThisFrame; // 현재 상태 저장
+
+            } catch (error) {
+                console.error("Detection loop error:", error);
+                if (faceDetectedLastFrame) controlMainAudio(false); // 오류 시 끄기
+                faceDetectedLastFrame = false;
+            }
+
+            requestAnimationFrame(detectionLoop);
+        }
+
+        // --- 메인 실행 함수 ---
+        async function main() { /* 이전과 동일 */
+             console.log("main 시작"); statusDiv.innerText = "오디오 초기화 중..."; initAudio(); const cameraReady = await setupCamera(); if (!cameraReady) return; const modelReady = await loadModel(); if (!modelReady) return; statusDiv.innerText = "비디오 재생 시도..."; try { await video.play(); console.log("비디오 재생 시작됨."); statusDiv.innerText = "준비 완료. 얼굴을 보여주세요."; if (audioContext && audioContext.state === 'suspended') { statusDiv.innerText += " (오디오 활성화를 위해 화면 클릭)"; } detectionLoop(); } catch (playError) { console.error("비디오 재생 실패:", playError); statusDiv.innerText = "오류: 비디오 재생 실패. 페이지를 새로고침하거나 클릭해보세요."; }
+        }
+
+        // --- 페이지 로드 완료 시 실행 ---
+        window.addEventListener('load', () => { /* 이전과 동일 */
+            console.log("페이지 로드 완료"); main();
+        });
+
+    </script>
+</body>
+</html>
