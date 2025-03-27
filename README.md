@@ -1,7 +1,7 @@
 # Real-time Face Landmark Detection with Audio Pitch Control (face)
 
 [![GitHub](https://img.shields.io/badge/GitHub-hwkims-blue?logo=github)](https://github.com/hwkims)
-![image](https://github.com/user-attachments/assets/8e7a2dfb-f130-461e-945e-518d7364f435)
+
 # Real-time Face & Eye Detection with Interactive Audio (face v4)
 
 [![GitHub](https://img.shields.io/badge/GitHub-hwkims-blue?logo=github)](https://github.com/hwkims)
