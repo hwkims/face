@@ -3,11 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Face Aiming Reticle (MediaPipe)</title>
+    <title>Face Aiming Reticle (MediaPipe Tasks)</title>
     <style>
         body {
             margin: 0; padding: 0; display: flex; justify-content: center; align-items: center;
-            min-height: 100vh; background-color: #222; overflow: hidden;
+            min-height: 100vh; background-color: #222; overflow: hidden; font-family: sans-serif;
         }
         #container {
             position: relative; width: 640px; height: 480px;
@@ -23,27 +23,25 @@
             z-index: 10; pointer-events: none;
         }
         /* Reticle Styles */
-        .reticle { stroke: rgba(255, 0, 0, 0.8); stroke-width: 2; fill: none; }
-        .reticle-center-dot { fill: rgba(255, 0, 0, 0.9); }
+        .reticle { stroke: rgba(0, 255, 0, 0.8); stroke-width: 2; fill: none; } /* Green reticle */
+        .reticle-center-dot { fill: rgba(0, 255, 0, 0.9); } /* Green dot */
         .reticle-group { transition: transform 0.05s linear; }
 
         /* Loading/Error Messages */
          #message {
             position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
-            color: white; font-size: 1.1em; background-color: rgba(0, 0, 0, 0.75);
+            color: white; font-size: 1.1em; background-color: rgba(0, 0, 0, 0.8);
             padding: 15px; border-radius: 5px; z-index: 20; text-align: center;
             display: block; /* Initially visible */ max-width: 80%;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.5);
          }
-         #message.error { background-color: rgba(200, 0, 0, 0.8); }
+         #message.error { background-color: rgba(200, 0, 0, 0.85); }
     </style>
 
-    <!-- MediaPipe Face Detector and Camera Utils -->
+    <!-- Import @mediapipe/tasks-vision -->
     <script type="module">
-        // Import necessary modules directly from CDN
-        import { FaceDetector, FilesetResolver } from 'https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4/face_detection.js';
-        import { Camera } from 'https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js';
-        // Drawing utils are optional, not used for the reticle here
-        // import { drawRectangle } from 'https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3/drawing_utils.js';
+        // Import necessary modules from tasks-vision CDN
+        import { FaceDetector, FilesetResolver } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.js'; // Use vision_bundle for simplicity
 
         const videoElement = document.getElementById('webcam');
         const overlayElement = document.getElementById('overlay');
@@ -52,6 +50,10 @@
         let reticleGroup = null;
         let videoWidth = 640;
         let videoHeight = 480;
+        let faceDetector;
+        let lastVideoTime = -1;
+        let detectionResults = null;
+        let isDetectorReady = false; // Flag to check if detector is initialized
 
         // --- Message Handling ---
         function showMessage(msg, isError = false) {
@@ -66,157 +68,157 @@
 
         // --- Reticle Drawing ---
         function updateReticle(normalizedX, normalizedY, size = 40) {
-            // Convert normalized coords (0.0-1.0) to pixel coords
             const pixelX = normalizedX * videoWidth;
             const pixelY = normalizedY * videoHeight;
-
-            // Mirror the X coordinate for display on the flipped video
-            const mirroredPixelX = videoWidth - pixelX;
+            const mirroredPixelX = videoWidth - pixelX; // Mirror X
 
             if (!reticleGroup) {
-                // Create reticle elements if they don't exist
                 reticleGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
                 reticleGroup.classList.add('reticle-group');
-
-                const halfSize = size / 2;
-                const lineOffset = 5;
-                const centerDotRadius = 3;
-
-                // Define shapes relative to the center (0,0) of the group
+                const halfSize = size / 2, lineOffset = 5, centerDotRadius = 3;
+                // Create shapes centered at (0,0)
                 const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-                circle.classList.add('reticle');
-                circle.setAttribute('r', halfSize);
-
+                circle.classList.add('reticle'); circle.setAttribute('r', halfSize);
                 const lineH = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-                lineH.classList.add('reticle');
-                lineH.setAttribute('x1', -halfSize - lineOffset); lineH.setAttribute('y1', 0);
-                lineH.setAttribute('x2', halfSize + lineOffset); lineH.setAttribute('y2', 0);
-
+                lineH.classList.add('reticle'); lineH.setAttribute('x1', -halfSize - lineOffset); lineH.setAttribute('y1', 0); lineH.setAttribute('x2', halfSize + lineOffset); lineH.setAttribute('y2', 0);
                 const lineV = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-                lineV.classList.add('reticle');
-                lineV.setAttribute('x1', 0); lineV.setAttribute('y1', -halfSize - lineOffset);
-                lineV.setAttribute('x2', 0); lineV.setAttribute('y2', halfSize + lineOffset);
-
+                lineV.classList.add('reticle'); lineV.setAttribute('x1', 0); lineV.setAttribute('y1', -halfSize - lineOffset); lineV.setAttribute('x2', 0); lineV.setAttribute('y2', halfSize + lineOffset);
                 const centerDot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-                centerDot.classList.add('reticle-center-dot');
-                centerDot.setAttribute('r', centerDotRadius);
-
-                reticleGroup.appendChild(circle);
-                reticleGroup.appendChild(lineH);
-                reticleGroup.appendChild(lineV);
-                reticleGroup.appendChild(centerDot);
+                centerDot.classList.add('reticle-center-dot'); centerDot.setAttribute('r', centerDotRadius);
+                reticleGroup.append(circle, lineH, lineV, centerDot); // Use append for multiple elements
                 overlayElement.appendChild(reticleGroup);
             }
-
-            // Update the position using transform
             reticleGroup.setAttribute('transform', `translate(${mirroredPixelX}, ${pixelY})`);
-            reticleGroup.style.display = ''; // Make sure it's visible
+            reticleGroup.style.display = '';
         }
 
         function hideReticle() {
-            if (reticleGroup) {
-                reticleGroup.style.display = 'none';
-            }
+            if (reticleGroup) reticleGroup.style.display = 'none';
         }
 
-        // --- MediaPipe Face Detection ---
-        function onResults(results) {
-            // results object contains detections
-            if (!results.detections || results.detections.length === 0) {
-                 // console.log('No face detected');
-                hideReticle();
-                return;
-            }
-
-            // Assuming we use the first detected face
-            const detection = results.detections[0];
-
-            // The bounding box contains normalized coordinates
-            const boundingBox = detection.boundingBox;
-            if (!boundingBox) {
-                hideReticle();
-                return;
-            }
-
-            // Calculate normalized center of the bounding box
-            const centerX = boundingBox.originX + boundingBox.width / 2;
-            const centerY = boundingBox.originY + boundingBox.height / 2;
-
-            // Update reticle position with normalized coordinates
-            updateReticle(centerX, centerY);
-
-            // Hide loading message once detection starts working
-            if (messageElement.style.display !== 'none' && !messageElement.classList.contains('error')) {
-                 setTimeout(hideMessage, 1000); // Hide after 1 second
-            }
-        }
-
-        async function initializeMediaPipe() {
-            showMessage('MediaPipe 리소스 로딩 중...');
+        // --- Initialize MediaPipe Face Detector ---
+        async function initializeFaceDetector() {
+            showMessage('얼굴 감지 모델 초기화 중...');
+            console.log('Initializing Face Detector...');
             try {
-                 // 1. Initialize FilesetResolver to locate WASM files
-                 const filesetResolver = await FilesetResolver.forVisionTasks(
-                     'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm' // Check for latest path if needed
+                 const vision = await FilesetResolver.forVisionTasks(
+                    // Path to the WASM files (check for latest version/path if needed)
+                    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
                  );
 
-                 // 2. Create FaceDetector instance
-                 const faceDetector = new FaceDetector(filesetResolver, {
-                    runningMode: 'VIDEO', // Process video stream
-                    // model: 'short', // or 'full'; 'short' is faster for closer faces
-                    // minDetectionConfidence: 0.5 // Adjust confidence threshold if needed
-                 });
-
-                await faceDetector.setOptions({ model: 'short', minDetectionConfidence: 0.5 });
-
-                showMessage('MediaPipe 로드 완료. 카메라 준비 중...');
-
-                // 3. Setup Camera Utils
-                const camera = new Camera(videoElement, {
-                    onFrame: async () => {
-                        // Called for each video frame
-                        await faceDetector.detectForVideo(videoElement, performance.now(), onResults);
+                 faceDetector = await FaceDetector.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite`, // Use short range model for speed
+                        delegate: 'GPU' // Use GPU if available, otherwise defaults to CPU
                     },
-                    width: videoWidth,
-                    height: videoHeight
-                });
-
-                // 4. Start the camera
-                await camera.start();
-                showMessage('카메라 시작됨. 얼굴을 보여주세요.');
-
+                    runningMode: 'VIDEO', // Important for detectForVideo
+                    // minDetectionConfidence: 0.5 // Default is 0.5
+                 });
+                 await faceDetector.setOptions({ runningMode: "VIDEO" }); // Ensure running mode is set
+                 isDetectorReady = true; // Set flag
+                 showMessage('모델 준비 완료. 카메라 시작 중...');
+                 console.log('Face Detector initialized successfully.');
+                 return true;
             } catch (error) {
-                 showMessage(`초기화 실패: ${error.message}`, true);
+                showMessage(`모델 초기화 실패: ${error.message}<br>브라우저 콘솔을 확인하세요.`, true);
+                return false;
             }
         }
 
+        // --- Start Webcam ---
+        async function startWebcam() {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                showMessage('오류: 웹캠 접근(getUserMedia)을 지원하지 않는 브라우저입니다.', true);
+                return false;
+            }
+            try {
+                showMessage('카메라 접근 권한 요청 중...');
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+                    audio: false
+                });
+                videoElement.srcObject = stream;
+                videoElement.addEventListener('loadeddata', () => { // Use 'loadeddata' which fires when the first frame is available
+                    videoWidth = videoElement.videoWidth;
+                    videoHeight = videoElement.videoHeight;
+                    containerElement.style.width = `${videoWidth}px`;
+                    containerElement.style.height = `${videoHeight}px`;
+                    overlayElement.setAttribute('viewBox', `0 0 ${videoWidth} ${videoHeight}`);
+                    console.log(`카메라 시작됨. 비디오 크기: ${videoWidth}x${videoHeight}`);
+                    showMessage('카메라 준비 완료. 감지 시작.');
+                     setTimeout(hideMessage, 1500); // Hide message after a short delay
+                    // Start the prediction loop
+                    requestAnimationFrame(predictWebcam);
+                });
+                return true;
+            } catch (error) {
+                 let msg = `카메라 접근 실패: ${error.name} - ${error.message}`;
+                 if (error.name === "NotAllowedError") msg = "카메라 접근 권한이 거부되었습니다. 권한을 허용해주세요.";
+                 else if (error.name === "NotFoundError") msg = "사용 가능한 카메라를 찾을 수 없습니다.";
+                 showMessage(msg, true);
+                 return false;
+            }
+        }
 
-        // --- Run Initialization ---
-        // Wait for the video element metadata to load to get dimensions
-        videoElement.onloadedmetadata = () => {
-            console.log('비디오 메타데이터 로드됨.');
-            videoWidth = videoElement.videoWidth;
-            videoHeight = videoElement.videoHeight;
-            // Adjust container and SVG if needed based on actual video size
-            containerElement.style.width = `${videoWidth}px`;
-            containerElement.style.height = `${videoHeight}px`;
-            overlayElement.setAttribute('viewBox', `0 0 ${videoWidth} ${videoHeight}`);
-            console.log(`비디오 크기 설정: ${videoWidth}x${videoHeight}`);
+        // --- Prediction Loop ---
+        async function predictWebcam() {
+             // Check if detector is ready and video has data
+            if (!isDetectorReady || videoElement.readyState < 2) { // readyState < 2 means not enough data
+                 requestAnimationFrame(predictWebcam);
+                 return;
+            }
 
-            // Now initialize MediaPipe
-            initializeMediaPipe();
-        };
+            // Only run detection if the video frame has changed
+             if (videoElement.currentTime !== lastVideoTime) {
+                 lastVideoTime = videoElement.currentTime;
+                 try {
+                     // Detect faces using detectForVideo
+                     detectionResults = faceDetector.detectForVideo(videoElement, performance.now());
 
-        // Handle potential video loading errors
-         videoElement.onerror = (e) => {
-             showMessage(`비디오 로드 오류: ${e.message || '알 수 없는 오류'}. 카메라 연결 및 권한을 확인하세요.`, true);
-         };
+                     // Process results
+                     if (detectionResults && detectionResults.detections && detectionResults.detections.length > 0) {
+                         const detection = detectionResults.detections[0]; // Use the first detected face
+                         const boundingBox = detection.boundingBox;
+                         if (boundingBox) {
+                             // Calculate normalized center
+                             const centerX = boundingBox.originX + boundingBox.width / 2;
+                             const centerY = boundingBox.originY + boundingBox.height / 2;
+                             updateReticle(centerX, centerY);
+                         } else {
+                             hideReticle();
+                         }
+                     } else {
+                         hideReticle();
+                     }
+                 } catch (error) {
+                      console.error("Error during face detection:", error);
+                      hideReticle(); // Hide reticle on error
+                 }
+             }
+
+            // Call recursively for the next frame
+            requestAnimationFrame(predictWebcam);
+        }
+
+        // --- Main Execution ---
+        async function run() {
+            showMessage('페이지 로딩 완료. 초기화 시작...');
+            const detectorInitialized = await initializeFaceDetector();
+            if (detectorInitialized) {
+                await startWebcam();
+                // Webcam start handles kicking off the prediction loop
+            }
+            // Error messages are handled within the functions
+        }
+
+        // Run after DOM is loaded
+        document.addEventListener('DOMContentLoaded', run);
 
     </script>
 
 </head>
 <body>
     <div id="container">
-        <!-- Video element needs to be present before script runs -->
         <video id="webcam" autoplay muted playsinline></video>
         <svg id="overlay"></svg>
         <div id="message">페이지 로딩 중...</div>
