@@ -1,6 +1,7 @@
 # Real-time Face Landmark Detection with Audio Pitch Control (face)
 
 [![GitHub](https://img.shields.io/badge/GitHub-hwkims-blue?logo=github)](https://github.com/hwkims)
+![image](https://github.com/user-attachments/assets/8e7a2dfb-f130-461e-945e-518d7364f435)
 
 This project demonstrates real-time face landmark detection using a webcam feed. It utilizes **TensorFlow.js** with the **MediaPipe Face Mesh** model to detect 468 detailed facial landmarks.
 
